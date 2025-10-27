@@ -3,6 +3,13 @@
 #include <stdlib.h>
 #include <time.h>
 
+// for IO system calls and options
+#include <fcntl.h>
+#include <unistd.h>
+
+// for boolean
+#include <stdbool.h>
+
 #include "main_2_cache.h"
 
 static int cmpStationName(const void* a, const void* b) {
@@ -72,26 +79,54 @@ int main(void) {
 
     clock_t start = clock();
 
-    // allocate on stack since its lifecycle is tied to main
-    // if dynamically allocated, need to free by hand
     WeatherStation ws;
     initWeatherStation(&ws, 16);
 
-    // using high level library calls like fgets/fread, extra libc overhead and 2 userspace memory buffers
-    FILE* file = fopen("../1brc-java/measurements.txt", "r");
-
-    char buffer[1024]; // holds 1 line but what if 1 line does not fit in 8KB?
-
-    // fgets treats file as byte stream but reads it as text, no conversion needed
-    // it overwrites as many bytes it needs for the line, plus a null terminator [\n\0 at end], rest of the buffers stays as it is
-    while (fgets(buffer, sizeof(buffer), file)) {
-        // process each line
-        char* station = strtok(buffer, ";"); // replaces by \0
-        char* temp_str = strtok(NULL, "\n"); // works on the same char*, remember next starting point
-        double temp = atof(temp_str);
-
-        addStation(&ws, station, temp);
+    // low level system calls vs fopen, fread and not buffered too
+    int fd = open("../1brc-java/measurements.txt", O_RDONLY);
+    if (fd < 0)
+    {
+        perror("open failed");
+        return 1;
     }
+
+    char buffer[32768];
+    char myBuffer[32768];
+
+    int myBufferStart = 0;
+    int myBufferBound = 0;
+
+    char* city = NULL;
+    char* temp = NULL;
+
+    int bytesRead;
+    while ((bytesRead = read(fd, buffer, sizeof(buffer))) > 0)
+    {
+        for (int i = 0; i < bytesRead; i++)
+        {
+            if (buffer[i] == ';')
+            {
+                myBuffer[myBufferStart++] = '\0';
+                city = &myBuffer[myBufferBound];
+                myBufferBound = myBufferStart;
+            }
+            else if (buffer[i] == '\n')
+            {
+                myBuffer[myBufferStart] = '\0';
+                temp = &myBuffer[myBufferBound];
+                addStation(&ws, city, atof(temp));
+                // after every new line, I can start from 0 in myBuffer
+                myBufferStart = 0;
+                myBufferBound = 0;
+            }
+            else
+            {
+                myBuffer[myBufferStart++] = buffer[i];
+            }
+        }
+    }
+
+    close(fd);
 
     NamedRecord* sortArray = (NamedRecord*)calloc(ws.count, sizeof(NamedRecord));
     for (int i = 0; i < ws.count; i++) {
@@ -117,5 +152,7 @@ int main(void) {
 }
 
 
-// time take: 700s
-// time taken with -O3 flag: 576s
+// time elapsed for 413 records: 1367.346s with 4KB,
+// 1000s with 8KB
+// 500s with 16KB and O3 flag
+// 494s with 32KB and O3 flag
